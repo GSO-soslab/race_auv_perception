@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.ros.org/wiki/package_format3/Description"?>
+<package format="3">
+  <name>race_auv_camera_pkg</name>
+  <version>0.1.0</version>
+  <description>
+    Camera + per-camera AprilTag detector + multi-camera AprilTag fuser.
+    This package ships the Python executables (apriltag_detector_node,
+    apriltag_fuser_node) and their shared private modules (URDF parser,
+    geometry helpers, image processing). All configuration lives in
+    race_auv_bringup/config/ and all launch files in
+    race_auv_bringup/launch/include/.
+  </description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>vision_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <exec_depend>dwe_camera_driver</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>race_auv_apriltag_cuda</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.ros.org/wiki/package_format3/Description"?>
+<package format="3">
+  <name>race_auv_apriltag_cuda</name>
+  <version>0.1.0</version>
+  <description>
+    In-process CUDA helpers for the AprilTag pipeline. Two shared
+    libraries: a C shim around NVIDIA's cuAprilTags detector (loaded by
+    ctypes), and a GPU image-stage shim (nvjpeg decode/encode + VPI CUDA
+    fisheye rectify). Used by race_auv_camera_pkg's
+    apriltag_detector_node as the "cuda" detector and image backends.
+  </description>
+  <maintainer email="dev@example.com">dev</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

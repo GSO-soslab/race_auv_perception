@@ -1,0 +1,4 @@
+[submodule "third_party/isaac_ros_nitros"]
+	path = third_party/isaac_ros_nitros
+	url = https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_nitros.git
+	branch = release-4.6
