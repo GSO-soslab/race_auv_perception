@@ -70,7 +70,7 @@ This guide was validated on:
 | CMake | 3.28.3 | `cmake --version` |
 | ROS 2 | Jazzy | `echo $ROS_DISTRO` |
 | Python | 3.12.3 | `python3 --version` |
-| OpenCV | apt 4.6.0 **and** NVIDIA JetPack `libopencv` 4.8.0 | see §9.4 |
+| OpenCV | apt 4.6.0 (no CUDA needed; see §9.3) | `python3 -c "import cv2; print(cv2.__version__)"` |
 | VPI | 4.1.4 (`/opt/nvidia/vpi4`, CUDA backend) | `dpkg-query -W libnvvpi4` |
 | nvjpeg | 13.1.0 (`libnvjpeg-13-2`) | `dpkg-query -W libnvjpeg-13-2` |
 | git-lfs | 3.4.1 (user-local `~/.local/bin`) | `git lfs version` |
@@ -371,36 +371,36 @@ Verify with `jtop` or `tegrastats`.
 
 ### 7.2 Launch
 
-The hardware launch file reads `race_auv_bringup/config/apriltag.yaml`
-and starts, per enabled camera, one camera driver and one detector.
+`bringup_camera_perception.launch.py` starts the two camera drivers
+(`multi_camera.launch.py`), then -- after a few seconds -- the
+detectors (`apriltag_detection.launch.py`, which reads
+`race_auv_bringup/config/apriltag.yaml`).
 
 ```bash
 cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch race_auv_bringup camera_apriltag.launch.py
+ros2 launch race_auv_bringup bringup_camera_perception.launch.py
 ```
 
-Startup order is staggered on purpose (2 s between spawns):
+Startup order is staggered on purpose:
 
 ```
 t = 0 s   stellar_camera_node_1   (/dev/video0)
-t = 2 s   stellar_camera_node_2   (/dev/video2)
-t = 4 s   apriltag_detector_cam_front
-t = 6 s   apriltag_detector_cam_down
+t = 0 s   stellar_camera_node_2   (/dev/video2)
+t = 3 s   apriltag_detector_cam_front
+t = 3 s   apriltag_detector_cam_down
 ```
 
-The stagger works around a UVC probe race in `dwe_camera_driver`; see
-`Jetson.md` §4.1.
+`multi_camera.launch.py` lists `stellar_camera_node_1` (`/dev/video0`)
+first, which works around a UVC probe race in `dwe_camera_driver`; see
+`Jetson.md` §4.1. The detectors are then delayed 3 s so both cameras
+have started publishing before anything subscribes.
 
-The launch file also auto-prepends the best `cv2` on the system to
-`PYTHONPATH` (it finds the NVIDIA OpenCV 4.8 at
-`/usr/lib/python3.12/dist-packages`). Override with:
-
-```bash
-ros2 launch race_auv_bringup camera_apriltag.launch.py \
-    opencv_python_path:=/path/containing/cv2
-```
+Note: the CUDA detector/image backends (`detector_backend: "cuda"`,
+`image_pipeline: "cuda"`) run through in-process cuAprilTags/nvjpeg/VPI
+shims, not `cv2.cuda` -- there is no OpenCV PYTHONPATH override to
+worry about here.
 
 ### 7.3 Topics
 
@@ -614,15 +614,6 @@ tags:
   Set `cuda_nominal_size` to a tag size that is commonly present; the
   default (0.125) matches the station's medium tags.
 
-### 9.4 OpenCV selection
-
-The launch file probes for a `cv2` on `PYTHONPATH` and prepends the
-first found (this machine: NVIDIA `libopencv` 4.8.0 at
-`/usr/lib/python3.12/dist-packages`; the apt build is 4.6.0 at
-`/usr/lib/python3/dist-packages`). Neither has CUDA, which is fine —
-rectification stays on the CPU and detection uses cuAprilTags directly.
-Override with `opencv_python_path:=<dir>`.
-
 ---
 
 ## 10. Switching backends / rollback
@@ -828,7 +819,7 @@ Copy/paste as you go:
 - [ ] `ls /opt/nvidia/vpi4` and `ls /usr/local/cuda/include/nvjpeg.h` (GPU path, §2)
 - [ ] `python3 .../test/cuapriltags_smoke.py` prints `PASS`
 - [ ] `python3 .../test/gpu_image_smoke.py` prints `PASS` (GPU path)
-- [ ] `ros2 launch race_auv_bringup camera_apriltag.launch.py` starts 4 processes
+- [ ] `ros2 launch race_auv_bringup bringup_camera_perception.launch.py` starts 4 processes
 - [ ] Detector log shows `detector backend: cuda` and `image  backend  : cuda` (GPU path)
 - [ ] `ros2 topic hz /cam_front/apriltag_detection/detections3d` is non-zero with a tag in view
 - [ ] Annotated image visible in Foxglove
@@ -872,8 +863,11 @@ race_auv_bringup/
 ├── config/simulation/apriltag.yaml     # simulation (raw images, CPU pipeline)
 ├── config/explore_cam_apriltag.yaml    # single exploreHD/USB camera test (§7.6)
 ├── launch/explore_cam_apriltag.launch.py
-└── launch/include/camera_apriltag.launch.py
-    launch/include/simulation/apriltag_sim.launch.py
+├── launch/bringup_camera_perception.launch.py   # multi_camera + apriltag_detection
+└── launch/include/
+    ├── multi_camera.launch.py          # 2x dwe_camera_driver camera_node
+    ├── apriltag_detection.launch.py    # 2x apriltag_detector_node
+    └── simulation/apriltag_sim.launch.py
 ```
 
 ---
