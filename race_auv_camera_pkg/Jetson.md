@@ -240,35 +240,28 @@ exists, but the UVC driver hasn't necessarily finished probing the
 capture endpoint yet. `cv2.VideoCapture(N)` returns `ENODEV` /
 `EBUSY` when called before that probe completes.
 
-**Why `multi_camera.launch.py` works and `camera_apriltag.launch.py`
-didn't:** launch order.
+**Why `multi_camera.launch.py` works and the original
+`camera_apriltag.launch.py` didn't:** launch order.
 
 * `multi_camera.launch.py` lists `stellar_camera_node_1` first
   (maps to `usb-3610000.usb-2.1` -> `/dev/video0`). `/dev/video0`
   opens successfully because the UVC probe for the lower-indexed
   device finishes first. Then `stellar_camera_node_2` opens
   `/dev/video2` and the kernel has had time to finish its probe.
-* `camera_apriltag.launch.py` originally iterated the YAML cameras
-  list (`cam_front` first, which mapped to `usb-3610000.usb-2.3` ->
-  `/dev/video2`) and interleaved each detector with its driver.
-  Result: `/dev/video2` was opened first -- before the UVC probe
-  finished -- and failed; `/dev/video0` opened second and won.
+* `camera_apriltag.launch.py` (removed; superseded by
+  `multi_camera.launch.py` + `apriltag_detection.launch.py`, chained
+  by `bringup_camera_perception.launch.py`) originally iterated the
+  YAML cameras list (`cam_front` first, which mapped to
+  `usb-3610000.usb-2.3` -> `/dev/video2`) and interleaved each
+  detector with its driver. Result: `/dev/video2` was opened first --
+  before the UVC probe finished -- and failed; `/dev/video0` opened
+  second and won.
 
-**The fix (in our launch file):** strictly sequential spawn with a
-2-second delay between each of the four nodes:
-
-```
-t = 0 s   camera_node_1
-t = 2 s   camera_node_2
-t = 4 s   detector_1   (paired with camera_node_1)
-t = 6 s   detector_2   (paired with camera_node_2)
-```
-
-Drivers are sorted by `driver.node_name` so the kernel-lowest
-`/dev/videoN` is spawned first. The detector for camera 1 is spawned
-*after* camera 2, so the camera has a full ~4 s head start before its
-detector starts subscribing -- enough to clear any remaining UVC /
-OpenCV race. See the launch file docstring for the full rationale.
+**The fix:** `multi_camera.launch.py` keeps the correct driver order
+(lowest `/dev/videoN` first) with no interleaved detectors, and
+`bringup_camera_perception.launch.py` delays
+`apriltag_detection.launch.py` by a few seconds so both cameras are
+already publishing before any detector subscribes.
 
 If you can't wait for an upstream fix in `dwe_camera_driver`, the
 underlying issue (no retry on `ENODEV`) is still there -- the
