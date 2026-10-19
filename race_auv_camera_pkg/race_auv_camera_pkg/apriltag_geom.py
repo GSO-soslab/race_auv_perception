@@ -13,6 +13,8 @@ Both ``apriltag_detector_node`` (per-camera detector) and
   Supports an optional per-pair weight (e.g. ``1/d^2`` so closer tags
   dominate) and a RANSAC wrapper for outlier-robust fitting.
 * The YAML-driven URDF path resolution used by the bridge launches.
+* The canonical tag-corner order shared with ``race_auv_factorgraph``,
+  and the reordering of detected corners into it.
 
 Centralizing these keeps the detector and the fuser byte-for-byte aligned
 on the math (and the small numerical edge cases), so a fix in one place
@@ -68,6 +70,73 @@ def is_bad_rotation(M: np.ndarray) -> bool:
     if not np.allclose(M @ M.T, np.eye(3), atol=1e-3):
         return True
     return False
+
+
+def canonical_tag_corners(size: float) -> np.ndarray:
+    """Corner points of a tag in its own frame, in the canonical order, ``(4, 3)``.
+
+    ``size`` is the black-square edge length. The canonical order is the one
+    published on the ``apriltag_msgs`` tags topic and assumed by
+    ``race_auv_factorgraph`` (``core/model.py:tag_corner_points``):
+
+    ===== ================ ===========================================
+    index tag-frame point  (tag frame: x right, y down, z into the tag)
+    ===== ================ ===========================================
+    0     (-s/2, +s/2, 0)  left-bottom
+    1     (+s/2, +s/2, 0)  right-bottom
+    2     (+s/2, -s/2, 0)  right-top
+    3     (-s/2, -s/2, 0)  left-top
+    ===== ================ ===========================================
+
+    This matches the AprilTag 3 library (``lb-rb-rt-lt``) and
+    ``cv2.SOLVEPNP_IPPE_SQUARE``.
+    """
+    h = 0.5 * float(size)
+    return np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]])
+
+
+def canonical_corner_order(
+    corners: np.ndarray,
+    T_cam_tag: np.ndarray,
+    size: float,
+    fx: float, fy: float, cx: float, cy: float,
+) -> Tuple[np.ndarray, float]:
+    """Reorder 4 detected corners into the canonical order.
+
+    The backends do not agree on corner order: apriltag3 returns
+    ``lb-rb-rt-lt``, while cuAprilTags passes through its own undocumented
+    order. A consumer that projects known tag-frame corners (the factor
+    graph) needs each pixel matched to the right 3D corner.
+
+    The detector's own pose ``T_cam_tag`` defines the tag frame, and the
+    station URDF tag frames are defined to match it. So the canonical
+    corners are projected through ``T_cam_tag`` with the camera matrix, and
+    the cyclic shift / direction of ``corners`` that lands closest to those
+    projections is chosen (8 candidates). Only a rough pose is needed to pick
+    the order: in-plane orientation within +-45 deg. The pose's flip
+    ambiguity does not change the in-plane orientation.
+
+    ``corners`` and ``fx, fy, cx, cy`` must be in the same image (here: the
+    full-resolution rectified image).
+
+    Returns ``(ordered_corners (4, 2), mean_pixel_error)``. A large error
+    (compared with the tag's pixel size) means the pose was unusable.
+    """
+    obj = canonical_tag_corners(size)
+    Rm, t = T_cam_tag[:3, :3], T_cam_tag[:3, 3]
+    p = obj @ Rm.T + t                               # corners in the camera frame
+    z = np.where(np.abs(p[:, 2]) < 1e-9, 1e-9, p[:, 2])
+    pred = np.stack([fx * p[:, 0] / z + cx, fy * p[:, 1] / z + cy], axis=1)
+
+    c = np.asarray(corners, dtype=np.float64).reshape(4, 2)
+    best, best_err = c, np.inf
+    for seq in (c, c[::-1]):                         # both winding directions
+        for shift in range(4):
+            cand = np.roll(seq, -shift, axis=0)
+            err = float(np.mean(np.linalg.norm(cand - pred, axis=1)))
+            if err < best_err:
+                best, best_err = cand, err
+    return best, best_err
 
 
 def matrix_to_pose_msg(T: np.ndarray) -> Pose:

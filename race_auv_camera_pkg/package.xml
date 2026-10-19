@@ -18,6 +18,7 @@
   <depend>sensor_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>vision_msgs</depend>
+  <depend>apriltag_msgs</depend>  <!-- corner detections for race_auv_factorgraph -->
   <depend>geometry_msgs</depend>
   <depend>tf2_ros</depend>
 

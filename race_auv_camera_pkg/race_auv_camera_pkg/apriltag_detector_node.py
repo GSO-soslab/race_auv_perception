@@ -10,6 +10,16 @@ each frame, and publishes:
   one entry per detected tag. ``Detection3D.id`` is
   ``f"{family}:{tag_id}"`` and ``results[0].pose.pose`` is the tag's
   pose in the camera frame.
+* ``apriltag_msgs/AprilTagDetectionArray`` on ``output_tags_topic``
+  (default ``apriltag_detection/tags``) with the **4 corner pixels** of
+  every tag, for corner-level consumers such as the factor-graph
+  ``dock_fuser`` (``race_auv_factorgraph``). Same header as the
+  ``Detection3DArray`` (image stamp, camera frame). Corners are in the
+  full-resolution **rectified** image, in the canonical order of
+  :func:`apriltag_geom.canonical_tag_corners`, whatever the backend
+  (see :func:`apriltag_geom.canonical_corner_order`). Only ``family``,
+  ``id``, ``centre`` and ``corners`` are filled; ``hamming``,
+  ``goodness``, ``decision_margin`` and ``homography`` are left at 0.
 * An annotated ``sensor_msgs/CompressedImage`` on
   ``output_image_topic``: tag bounding boxes + id labels + pose
   overlays, plus a red crosshair at the image center. This is the
@@ -89,6 +99,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import rclpy
+from apriltag_msgs.msg import AprilTagDetection, AprilTagDetectionArray
+from apriltag_msgs.msg import Point as AprilTagPoint
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Pose, PoseWithCovariance, Vector3
 from rclpy.node import Node
@@ -102,7 +114,8 @@ from vision_msgs.msg import (
 )
 
 from .apriltag_geom import (
-    is_bad_rotation, load_yaml_config, matrix_to_pose_msg, sanitize_rotation,
+    canonical_corner_order, is_bad_rotation, load_yaml_config,
+    matrix_to_pose_msg, sanitize_rotation,
 )
 from .apriltag_processor import AprilTagDetector
 from .image_processing import build_rectifier
@@ -137,6 +150,11 @@ _OUTPUT_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
     depth=1,
 )
+
+# One sanitized detection, as passed from the image paths to the publishers:
+# (family, tag_id, T_cam_to_tag 4x4, was_bad, corners (4, 2) px in the
+# full-resolution rectified image in backend order, tag size in m).
+_Detected = Tuple[str, int, np.ndarray, bool, np.ndarray, float]
 
 
 # =============================================================================
@@ -220,6 +238,8 @@ class AprilTagDetectorNode(Node):
         self.declare_parameter("camera_frame", "")
         self.declare_parameter("output_image_topic", "apriltag_detection/image")
         self.declare_parameter("output_detections_topic", "apriltag_detection/detections3d")
+        # Corner detections (apriltag_msgs) for the factor-graph dock_fuser.
+        self.declare_parameter("output_tags_topic", "apriltag_detection/tags")
         self.declare_parameter("publish_rate", 5.0)
 
         # Tag list: per-camera JSON override (set by launch), else YAML tags.
@@ -270,6 +290,12 @@ class AprilTagDetectorNode(Node):
         self._lock = threading.Lock()
         self._latest_bgr: Optional[np.ndarray] = None
         self._latest_stamp = None
+        # Stamp of the image the last tick processed. The timer can fire
+        # before the camera delivers a new image (e.g. a 5 Hz timer against
+        # a camera that hiccups); that tick is skipped instead of publishing
+        # the same image's detections again under the same stamp. Downstream,
+        # dock_fuser turns every detection message into one keyframe.
+        self._last_processed_stamp = None
         self._info_msg: Optional[CameraInfo] = None
         # The single detector instance (python ``AprilTagDetector`` or
         # CUDA ``CuAprilTagDetector``). Both expose detect()/annotate()
@@ -290,6 +316,10 @@ class AprilTagDetectorNode(Node):
         self._latest_jpeg: Optional[bytes] = None
         # The single CPU ``ImageRectifier`` instance.
         self._rectifier: Optional[object] = None
+        # (fx, fy, cx, cy) of the full-resolution rectified image, i.e. the
+        # image the published corners live in (after the process_scale
+        # up-scaling). Used to put corners into the canonical order.
+        self._full_res_K: Optional[Tuple[float, float, float, float]] = None
         self._rectifier_backend: str = "cpu"
         # JPEG quality cached at pipeline-build time so the encode
         # path does not need to read a ROS parameter on every frame.
@@ -304,6 +334,8 @@ class AprilTagDetectorNode(Node):
         # Running counter of detections dropped because of a bad pose;
         # used to throttle the per-tick warning spam.
         self._bad_pose_count = 0
+        # Tags skipped by _publish_tags because their corners could not be ordered.
+        self._bad_order_count = 0
 
         # Load tag list + detector defaults from YAML. The historical
         # ``use_cuda`` / ``jpeg_backend`` keys are read here but only
@@ -342,6 +374,9 @@ class AprilTagDetectorNode(Node):
         )
         self.detections_pub = self.create_publisher(
             Detection3DArray, self.get_parameter("output_detections_topic").value, _OUTPUT_QOS,
+        )
+        self.tags_pub = self.create_publisher(
+            AprilTagDetectionArray, self.get_parameter("output_tags_topic").value, _OUTPUT_QOS,
         )
 
         # ============================================================= tick / init
@@ -623,6 +658,8 @@ class AprilTagDetectorNode(Node):
             crop_to_valid_pixels=True,
         )
         new_K = self._rectifier.get_intrinsics()
+        self._full_res_K = (float(new_K["fx"]), float(new_K["fy"]),
+                            float(new_K["cx"]), float(new_K["cy"]))
         new_size = {
             "img_width": new_K["img_width"],
             "img_height": new_K["img_height"],
@@ -761,6 +798,12 @@ class AprilTagDetectorNode(Node):
             ),
         )
 
+        # Corners are scaled up to the display (full-resolution rectified)
+        # image in _tick_gpu, so that is the camera matrix they belong to.
+        disp_K = self._gpu_pipeline.display_intrinsics
+        self._full_res_K = (float(disp_K["fx"]), float(disp_K["fy"]),
+                            float(disp_K["cx"]), float(disp_K["cy"]))
+
         per_family, id_to_size, families = self._group_tags_by_family()
         child_logger = self.get_logger().get_child("det_all")
         detect_K = self._gpu_pipeline.detect_intrinsics
@@ -844,7 +887,12 @@ class AprilTagDetectorNode(Node):
 
         * the pipeline is not built yet (``_ready`` is False -- waiting
           on the first ``CameraInfo``);
-        * no frame has been received yet (``_latest_bgr`` is None).
+        * no frame has been received yet (``_latest_bgr`` is None);
+        * no *new* frame has arrived since the previous tick (same image
+          stamp, see :meth:`_is_new_image`).
+
+        Otherwise it publishes, also when no tag was found: an empty
+        detection message still tells consumers the image was processed.
         """
         if not self._ready:
             return
@@ -854,7 +902,7 @@ class AprilTagDetectorNode(Node):
         with self._lock:
             bgr = self._latest_bgr
             stamp = self._latest_stamp
-        if bgr is None:
+        if bgr is None or not self._is_new_image(stamp):
             return
 
         work, detected_tags = self._process_frame(bgr)
@@ -863,6 +911,21 @@ class AprilTagDetectorNode(Node):
         _draw_crosshair(work)
         self._publish_annotated(work, stamp)
         self._publish_detections(detected_tags, stamp)
+        self._publish_tags(detected_tags, stamp)
+
+    def _is_new_image(self, stamp) -> bool:
+        """True if ``stamp`` differs from the image processed on the previous tick.
+
+        Images without a stamp (``None``) are always treated as new; they get
+        the current time as their stamp in the tick.
+        """
+        if stamp is None:
+            return True
+        key = (stamp.sec, stamp.nanosec)
+        if key == self._last_processed_stamp:
+            return False
+        self._last_processed_stamp = key
+        return True
 
     def _tick_gpu(self) -> None:
         """GPU image path: nvjpeg decode -> VPI rectify -> cuAprilTags -> nvjpeg.
@@ -874,7 +937,7 @@ class AprilTagDetectorNode(Node):
         with self._lock:
             jpeg = self._latest_jpeg
             stamp = self._latest_stamp
-        if jpeg is None:
+        if jpeg is None or not self._is_new_image(stamp):
             return
         pipeline = self._gpu_pipeline
         detector = self._detector
@@ -932,6 +995,7 @@ class AprilTagDetectorNode(Node):
         if jpeg_out is not None:
             self._publish_annotated_bytes(jpeg_out, stamp)
         self._publish_detections(detected, stamp)
+        self._publish_tags(detected, stamp)
 
     def _within_frame(self, corners: np.ndarray, width: int, height: int) -> bool:
         """``True`` when every corner is >= ``min_edge_dist`` px from the border.
@@ -952,7 +1016,7 @@ class AprilTagDetectorNode(Node):
 
     def _process_frame(
         self, bgr: np.ndarray,
-    ) -> Tuple[np.ndarray, List[Tuple[str, int, np.ndarray, bool]]]:
+    ) -> Tuple[np.ndarray, List[_Detected]]:
         """Rectify + downscale + detect + annotate a single frame.
 
         Parameters
@@ -965,7 +1029,7 @@ class AprilTagDetectorNode(Node):
         (work, detections)
             ``work`` is the full-resolution rectified BGR ready for
             the crosshair + JPEG encode pass. ``detections`` is the
-            list of ``(family, tag_id, T_cam_to_tag, was_bad)`` that
+            list of ``(family, tag_id, T_cam_to_tag, was_bad, corners, size)`` that
             ``_publish_detections`` turns into a
             ``vision_msgs/Detection3DArray``.
         """
@@ -984,7 +1048,7 @@ class AprilTagDetectorNode(Node):
 
         # 3. Run the selected detector. cuAprilTags consumes the BGR
         #    frame directly (uchar3); apriltag3 needs grayscale.
-        detected: List[Tuple[str, int, np.ndarray, bool]] = []
+        detected: List[_Detected] = []
         detector = self._detector
         if detector is None:
             return work, detected
@@ -1034,15 +1098,15 @@ class AprilTagDetectorNode(Node):
 
     def _sanitize_detections(
         self, detections: List[Dict],
-    ) -> List[Tuple[str, int, np.ndarray, bool]]:
+    ) -> List[_Detected]:
         """Project rotations onto SO(3); drop unrecoverable detections.
 
         Shared by the CPU and GPU image paths. Returns the
-        ``(family, tag_id, T, was_bad)`` tuples ``_publish_detections``
+        ``(family, tag_id, T, was_bad, corners, size)`` tuples ``_publish_detections``
         consumes and mutates ``det["T"]`` in place so annotation draws
         the sanitized pose.
         """
-        detected: List[Tuple[str, int, np.ndarray, bool]] = []
+        detected: List[_Detected] = []
         for det in detections:
             family = det["family"]
             tag_id = det["tag_id"]
@@ -1055,7 +1119,9 @@ class AprilTagDetectorNode(Node):
                     or np.linalg.det(T[:3, :3]) < 0.5
                 ):
                     raise ValueError("rotation unrecoverable after SVD")
-                detected.append((family, tag_id, T, was_bad))
+                detected.append((family, tag_id, T, was_bad,
+                                 np.asarray(det["corners"], dtype=np.float64).reshape(4, 2),
+                                 float(det["size"])))
             except Exception as e:
                 self._bad_pose_count += 1
                 if self._bad_pose_count in (1, 10, 100, 1000) or (
@@ -1106,7 +1172,7 @@ class AprilTagDetectorNode(Node):
 
     def _publish_detections(
         self,
-        detected: List[Tuple[str, int, np.ndarray, bool]],
+        detected: List[_Detected],
         stamp,
     ) -> None:
         """Publish ``detected`` as ``vision_msgs/Detection3DArray``.
@@ -1119,7 +1185,7 @@ class AprilTagDetectorNode(Node):
         msg.header.stamp = stamp
         msg.header.frame_id = self._camera_frame_id()
 
-        for family, tag_id, T_cam_to_tag, _was_bad in detected:
+        for family, tag_id, T_cam_to_tag, _was_bad, _corners, _size in detected:
             det3d = Detection3D()
             det3d.header = msg.header
             det3d.id = f"{family}:{tag_id}"
@@ -1134,6 +1200,49 @@ class AprilTagDetectorNode(Node):
             msg.detections.append(det3d)
 
         self.detections_pub.publish(msg)
+
+    def _publish_tags(self, detected: List[_Detected], stamp) -> None:
+        """Publish the corner pixels of ``detected`` as ``apriltag_msgs/AprilTagDetectionArray``.
+
+        Each tag's corners are put into the canonical order first
+        (:func:`apriltag_geom.canonical_corner_order`): the detector's own
+        pose ``T_cam_to_tag`` defines which pixel is which tag-frame corner.
+        Consumers can then project known 3D corners without caring which
+        backend produced the detection.
+
+        A tag whose pose disagrees badly with its own corners (mean error
+        over a quarter of the tag's pixel size) has an unusable pose; its
+        corners cannot be ordered reliably and it is skipped.
+
+        The message is published even when empty, so consumers can tell
+        "no tags in view" from "detector not running".
+        """
+        if self._full_res_K is None:  # pipeline not built yet
+            return
+        fx, fy, cx, cy = self._full_res_K
+        msg = AprilTagDetectionArray()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self._camera_frame_id()
+
+        for family, tag_id, T_cam_to_tag, _was_bad, corners, size in detected:
+            ordered, err = canonical_corner_order(corners, T_cam_to_tag, size, fx, fy, cx, cy)
+            tag_px = float(np.sqrt(abs(
+                np.cross(ordered[1] - ordered[0], ordered[3] - ordered[0]))))
+            if err > 0.25 * max(tag_px, 1.0):
+                self._bad_order_count += 1
+                if self._bad_order_count in (1, 10, 100) or self._bad_order_count % 1000 == 0:
+                    self.get_logger().warn(
+                        f"Skipped corners of {family}:{tag_id}: pose and corners disagree by "
+                        f"{err:.1f} px (total skipped: {self._bad_order_count})")
+                continue
+            det = AprilTagDetection()
+            det.family = family
+            det.id = int(tag_id)
+            det.centre = AprilTagPoint(x=float(ordered[:, 0].mean()), y=float(ordered[:, 1].mean()))
+            det.corners = [AprilTagPoint(x=float(u), y=float(v)) for u, v in ordered]
+            msg.detections.append(det)
+
+        self.tags_pub.publish(msg)
 
     # =====================================================================
     # Frame id
