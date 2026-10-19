@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.ros.org/wiki/package_format3/Description"?>
+<package format="3">
+  <name>race_auv_camera_tag_factorgraph</name>
+  <version>0.1.0</version>
+  <description>
+    Minimal tag36h11 detector for race_auv_factorgraph (dock_fuser): rectify
+    the camera image (cv2), detect tag36h11 with apriltag3 on the CPU, check
+    each detection's image quality, and publish its 4 corners (canonical
+    order) and IPPE pose at the image stamp. One message per processed
+    image, also when no tag is in view. Configuration lives in
+    race_auv_bringup/config/tag_factorgraph_detector.yaml.
+  </description>
+  <maintainer email="yweifu@uri.edu">dark3090</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+  <depend>apriltag_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <!-- apriltag3 Python binding (AprilRobotics/apriltag, `import apriltag`) -->
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
