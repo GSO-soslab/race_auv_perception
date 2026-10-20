@@ -447,6 +447,7 @@ class CuAprilTagDetector:
         """Draw the shared overlay via :func:`annotate_detections`."""
         return annotate_detections(
             image, detections, self.camera_matrix, self.dist_coeffs, self.logger,
+            detector_size=(self.img_width, self.img_height),
         )
 
     # =====================================================================

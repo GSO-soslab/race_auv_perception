@@ -330,6 +330,7 @@ class AprilTagDetector:
         """
         return annotate_detections(
             image, detections, self.camera_matrix, self.dist_coeffs, self.logger,
+            detector_size=(self.img_width, self.img_height),
         )
 
 # =============================================================================
@@ -341,6 +342,7 @@ def annotate_detections(
     camera_matrix: np.ndarray,
     dist_coeffs: np.ndarray,
     logger,
+    detector_size: tuple[int, int] | None = None,
 ) -> np.ndarray:
     """Draw bounding boxes, axes, and id labels for ``detections`` in-place.
 
@@ -370,6 +372,12 @@ def annotate_detections(
         Pinhole model used to project the tag axes.
     logger
         A ``rclpy``-compatible logger.
+    detector_size
+        ``(width, height)`` of the image ``camera_matrix`` was built for.
+        When given and different from ``image``'s size (e.g. the caller
+        passes the full-resolution display frame while the detector ran on
+        a downscaled frame), K is rescaled to ``image`` before projecting
+        the axes. ``None`` disables the rescale.
 
     Returns
     -------
@@ -378,6 +386,23 @@ def annotate_detections(
     """
     if image is None:
         return image
+
+    # The backends' K is built for the detection-resolution frame; when the
+    # caller draws on a differently sized frame (full-res display image),
+    # rescale K so the projected axes land correctly. tvec is metric and
+    # axis_length is in metres, so only the pinhole model needs scaling.
+    if detector_size is not None:
+        det_w, det_h = int(detector_size[0]), int(detector_size[1])
+        if det_w > 0 and det_h > 0:
+            h, w = image.shape[:2]
+            if w != det_w or h != det_h:
+                sx = w / float(det_w)
+                sy = h / float(det_h)
+                camera_matrix = camera_matrix.copy()
+                camera_matrix[0, 0] *= sx
+                camera_matrix[0, 2] *= sx
+                camera_matrix[1, 1] *= sy
+                camera_matrix[1, 2] *= sy
 
     for det in detections:
         family = det["family"]
