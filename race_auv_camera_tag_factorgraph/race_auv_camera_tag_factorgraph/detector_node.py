@@ -19,9 +19,11 @@ takes the newest image, and if it is new:
    ``apriltag_detection/camera_info`` (``sensor_msgs/CameraInfo``, latched)
        The rectified camera matrix the corners live in. dock_fuser's
        ``cameras.<name>.fx/fy/cx/cy/width/height`` must equal it.
-   ``apriltag_detection/image`` (``sensor_msgs/CompressedImage``)
+   ``apriltag_detection/image/compressed`` (``sensor_msgs/CompressedImage``)
        Only with ``publish_image: true``: the rectified image with the tag
-       outlines, IDs and axes drawn (costs a JPEG encode per frame).
+       outlines, IDs and axes drawn (costs a JPEG encode per frame). Named
+       the image_transport way (base topic ``apriltag_detection/image``,
+       transport ``compressed``).
 
 Timing: the camera publishes faster (15 Hz) than the detector runs. The
 image callback only stores the newest message; decoding happens in the
@@ -151,7 +153,10 @@ class TagDetectorNode(Node):
                                                _OUTPUT_QOS)
         self.info_pub = self.create_publisher(CameraInfo, "apriltag_detection/camera_info",
                                               _LATCHED_QOS)
-        self.image_pub = (self.create_publisher(CompressedImage, "apriltag_detection/image",
+        # image_transport naming (<base>/compressed for a CompressedImage), so
+        # RViz / rqt decode it through the compressed plugin; Foxglove takes it as is.
+        self.image_pub = (self.create_publisher(CompressedImage,
+                                                "apriltag_detection/image/compressed",
                                                 _OUTPUT_QOS) if self.publish_image else None)
         if not compressed:
             from cv_bridge import CvBridge

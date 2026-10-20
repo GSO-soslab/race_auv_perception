@@ -19,7 +19,7 @@ when no tag is in view (dock_fuser makes one keyframe per message).
 | `apriltag_detection/tags` | `apriltag_msgs/AprilTagDetectionArray` | 4 corners per tag, rectified image, order `lb, rb, rt, lt` |
 | `apriltag_detection/detections3d` | `vision_msgs/Detection3DArray` | IPPE pose `T_cam_tag` per tag |
 | `apriltag_detection/camera_info` | `sensor_msgs/CameraInfo` (latched) | Rectified intrinsics; dock_fuser's `cameras.*` must equal them |
-| `apriltag_detection/image` | `sensor_msgs/CompressedImage` | Debug overlay, only with `publish_image: true` |
+| `apriltag_detection/image/compressed` | `sensor_msgs/CompressedImage` | Debug overlay, only with `publish_image: true` |
 
 All stamped with the image's `header.stamp`; `frame_id` = `camera_frame`.
 

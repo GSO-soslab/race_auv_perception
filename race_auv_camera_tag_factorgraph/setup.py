@@ -21,6 +21,8 @@ setup(
     entry_points={
         "console_scripts": [
             "tag_detector_node = race_auv_camera_tag_factorgraph.detector_node:main",
+            # display helper: 180 deg turn of a compressed image (topside RViz)
+            "image_rotate_node = race_auv_camera_tag_factorgraph.image_rotate_node:main",
         ],
     },
 )
