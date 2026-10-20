@@ -55,7 +55,10 @@ def render(tags):
     for tag_id, size, T in tags:
         n = 400
         # 180 deg turn: OpenCV's image -> apriltag3's tag frame (module docstring).
-        marker = np.rot90(cv2.aruco.generateImageMarker(dictionary, tag_id, n), 2).copy()
+        # generateImageMarker is OpenCV >= 4.7; the Jetson's system OpenCV 4.6
+        # still calls it drawMarker.
+        gen = getattr(cv2.aruco, "generateImageMarker", None) or cv2.aruco.drawMarker
+        marker = np.rot90(gen(dictionary, tag_id, n), 2).copy()
         uv = project(T, size)                      # lb, rb, rt, lt
         src = np.float32([[0, n], [n, n], [n, 0], [0, 0]])   # marker lb, rb, rt, lt
         Hm = cv2.getPerspectiveTransform(src, np.float32(uv))
@@ -143,13 +146,19 @@ def test_fit_rms_grows_with_a_bad_corner():
 
 
 def test_rectifier_matches_tank_calibration():
-    """Same rectified K as race_auv_camera_pkg's rectifier (what dock_fuser's tank config uses)."""
+    """Same rectified K as race_auv_camera_pkg's rectifier (what dock_fuser's tank config uses).
+
+    Tolerance 0.1 px: the fisheye new-camera-matrix estimate differs by ~0.04 px
+    between OpenCV versions (4.11 on the desktop, 4.6 on the Jetson). Harmless
+    at runtime: the detector publishes the K it actually rectified with in its
+    camera_info, and dock_fuser takes K from there.
+    """
     Kraw = np.array([[1262.74163, 0, 801.604094], [0, 1262.40141, 670.832446], [0, 0, 1]])
     D = [-0.0011265, -0.1213276, 0.444942, -0.388063]
     r = Rectifier(Kraw, D, (1600, 1200), fisheye=True)
     assert (r.width, r.height) == (1600, 1200)
     np.testing.assert_allclose([r.K[0, 0], r.K[1, 1], r.K[0, 2], r.K[1, 2]],
-                               [1165.2372, 1164.9232, 801.9339, 679.6697], atol=1e-3)
+                               [1165.2372, 1164.9232, 801.9339, 679.6697], atol=0.1)
 
 
 def test_rectifier_maps_to_the_distorted_pixel():
