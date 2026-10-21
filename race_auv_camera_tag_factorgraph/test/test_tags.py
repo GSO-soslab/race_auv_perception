@@ -172,3 +172,37 @@ def test_rectifier_maps_to_the_distorted_pixel():
         n = np.array([[[(u - r.K[0, 2]) / r.K[0, 0], (v - r.K[1, 2]) / r.K[1, 1]]]])
         raw = cv2.fisheye.distortPoints(n, Kraw, D).ravel()
         assert np.hypot(mx[v + y0, u + x0] - raw[0], my[v + y0, u + x0] - raw[1]) < 0.05
+
+
+# ---------------------------------------------------------------- per-camera tag selection
+from race_auv_camera_tag_factorgraph.tags import select_tags  # noqa: E402
+
+STATION_IDS = [54, 146, 176, 185, 541, 558]
+STATION_SIZES = [0.22, 0.12, 0.12, 0.12, 0.04, 0.04]
+
+
+def test_select_tags_all_by_default():
+    """No camera list (or the [-1] parameter default) keeps every station tag."""
+    full = dict(zip(STATION_IDS, STATION_SIZES))
+    assert select_tags(STATION_IDS, STATION_SIZES) == full
+    assert select_tags(STATION_IDS, STATION_SIZES, [-1]) == full
+
+
+def test_select_tags_subset_takes_station_sizes():
+    """A camera's subset gets its sizes from the station list, in the camera's order."""
+    assert select_tags(STATION_IDS, STATION_SIZES, [176, 185]) == {176: 0.12, 185: 0.12}
+    front = select_tags(STATION_IDS, STATION_SIZES, [54, 146, 541, 558])
+    assert front == {54: 0.22, 146: 0.12, 541: 0.04, 558: 0.04}
+
+
+def test_select_tags_rejects_non_station_id():
+    """A typo (167 for 176) fails at start-up, naming the ID."""
+    with pytest.raises(ValueError, match=r"\[167\]"):
+        select_tags(STATION_IDS, STATION_SIZES, [167, 185])
+
+
+def test_select_tags_rejects_bad_station_list():
+    with pytest.raises(ValueError):
+        select_tags([54, 146], [0.22])
+    with pytest.raises(ValueError):
+        select_tags([54], [0.0])

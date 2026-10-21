@@ -30,6 +30,14 @@ image callback only stores the newest message; decoding happens in the
 tick, so skipped frames cost nothing. A tick with no new image since the
 previous one is skipped (no re-published duplicate stamps).
 
+Synced mode (``sync_to``, e.g. cam_down synced to cam_front): no timer.
+Every message on ``sync_to`` (another detector's ``apriltag_detection/tags``)
+makes this node process its own buffered image nearest that message's
+stamp (:mod:`sync`), within ``sync_max_dt``. The two cameras' detections
+are then at most half a camera frame apart (33 ms at 15 Hz) instead of up
+to a whole detector period (0.2 s), which is what dock_fuser bridges with
+the EKF when it attaches this camera to the other's keyframes.
+
 Parameters: see ``race_auv_bringup/config/tag_factorgraph_detector.yaml``.
 """
 
@@ -50,7 +58,8 @@ from sensor_msgs.msg import CameraInfo, CompressedImage, Image
 from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
 
 from .rectify import Rectifier
-from .tags import FAMILY, FrameResult, TagDetector
+from .sync import ImageSync
+from .tags import FAMILY, FrameResult, TagDetector, select_tags
 
 # Camera input: only the newest image matters; anything queued is stale.
 _SENSOR_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -96,9 +105,17 @@ class TagDetectorNode(Node):
             "intrinsics.width": 0, "intrinsics.height": 0,
             "intrinsics.distortion": [0.0, 0.0, 0.0, 0.0],
             "intrinsics.fisheye": True,
-            # tag36h11 IDs and black-square sides [m], same length.
+            # tag36h11 IDs and black-square sides [m], same length: the
+            # station's tag list (station_tags.yaml).
             "tag_ids": [0],
             "tag_sizes": [0.0],
+            # The subset of tag_ids this camera reports ([-1] = all of them).
+            "camera_tag_ids": [-1],
+            # Synced mode: process the image nearest each message of this
+            # topic (another detector's tags) instead of running a timer.
+            "sync_to": "",
+            "sync_max_dt": 0.05,       # s; half a 15 Hz frame plus clock slack
+            "sync_wait": 0.1,          # s of reference time to wait for a nearer image
             # apriltag3.
             "threads": 4,
             "quad_decimate": 2.0,
@@ -120,14 +137,13 @@ class TagDetectorNode(Node):
         size = (int(g("intrinsics.width")), int(g("intrinsics.height")))
         if min(fx, fy, *size) <= 0:
             raise ValueError("intrinsics.fx/fy/width/height must be set (raw camera calibration)")
-        ids, sizes = list(g("tag_ids")), list(g("tag_sizes"))
-        if len(ids) != len(sizes) or not ids or min(sizes) <= 0:
-            raise ValueError("tag_ids and tag_sizes must be non-empty, equal length, sizes > 0")
+        tag_sizes = select_tags(list(g("tag_ids")), list(g("tag_sizes")), list(g("camera_tag_ids")))
+        ids, sizes = list(tag_sizes), list(tag_sizes.values())
         self.rectifier = Rectifier(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]]),
                                    g("intrinsics.distortion"), size, bool(g("intrinsics.fisheye")))
         r = self.rectifier
         self.detector = TagDetector(
-            dict(zip(ids, sizes)), r.K, r.width, r.height,
+            tag_sizes, r.K, r.width, r.height,
             threads=int(g("threads")), decimate=float(g("quad_decimate")),
             refine_edges=bool(g("refine_edges")), min_edge_px=float(g("min_edge_px")),
             min_side_px=float(g("min_side_px")), max_fit_rms_px=float(g("max_fit_rms_px")))
@@ -162,17 +178,37 @@ class TagDetectorNode(Node):
             from cv_bridge import CvBridge
             self._bridge = CvBridge()
         self._publish_camera_info()
-        self.create_timer(1.0 / float(g("publish_rate")), self._tick)
+        self.sync_to = str(g("sync_to") or "")
+        if self.sync_to:
+            self._sync = ImageSync(float(g("sync_max_dt")), float(g("sync_wait")))
+            self.create_subscription(AprilTagDetectionArray, self.sync_to, self._sync_cb,
+                                     _OUTPUT_QOS)
+        else:
+            self.create_timer(1.0 / float(g("publish_rate")), self._tick)
 
         self.get_logger().info(
             f"{FAMILY} ids {ids} sizes {sizes} on {g('image_topic')} at {g('publish_rate')} Hz; "
-            f"{r.describe()} (latched on apriltag_detection/camera_info for dock_fuser)")
+            f"{r.describe()} (latched on apriltag_detection/camera_info for dock_fuser)"
+            + (f"; synced to {self.sync_to} (nearest image within {g('sync_max_dt')} s)"
+               if self.sync_to else ""))
 
     # ==================================================================== input
     def _image_cb(self, msg) -> None:
-        """Keep only the newest image; decoding is deferred to the tick."""
+        """Keep only the newest image; decoding is deferred to the tick (or the sync match)."""
         with self._lock:
             self._latest = msg
+        if self.sync_to:
+            self._sync.add_image(_sec(msg.header.stamp), msg)
+            self._process_synced()
+
+    def _sync_cb(self, ref: AprilTagDetectionArray) -> None:
+        """A reference detection: process this camera's image nearest its stamp (synced mode)."""
+        self._sync.add_reference(_sec(ref.header.stamp))
+        self._process_synced()
+
+    def _process_synced(self) -> None:
+        for _, _, msg in self._sync.pop_ready():
+            self._process(msg)
 
     def _decode(self, msg) -> np.ndarray:
         """Image message -> numpy array (grayscale, or BGR when drawing the debug image)."""
@@ -192,7 +228,10 @@ class TagDetectorNode(Node):
         if stamp == self._last_stamp:
             return   # no new image since the last tick: nothing to publish
         self._last_stamp = stamp
+        self._process(msg)
 
+    def _process(self, msg) -> None:
+        """Decode, rectify, detect and publish one image (tick or sync match)."""
         t0 = time.perf_counter()
         img = self._decode(msg)
         if img is None:
@@ -276,6 +315,10 @@ class TagDetectorNode(Node):
             out.header.stamp = stamp
             out.header.frame_id = self.frame_id
             self.image_pub.publish(out)
+
+
+def _sec(stamp) -> float:
+    return float(stamp.sec) + 1e-9 * float(stamp.nanosec)
 
 
 def main(args=None) -> None:

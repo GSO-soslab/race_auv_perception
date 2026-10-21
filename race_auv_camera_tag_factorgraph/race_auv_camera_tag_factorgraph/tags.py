@@ -56,12 +56,37 @@ source; dock_fuser then only checks consistency over time.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 FAMILY = "tag36h11"
+
+
+def select_tags(ids: Sequence[int], sizes: Sequence[float],
+                camera_ids: Sequence[int] = ()) -> Dict[int, float]:
+    """``{id: size}`` this camera detects: the station list, or a subset of it by ID.
+
+    ``ids`` / ``sizes`` are the station's tag list (``station_tags.yaml``,
+    shared with dock_fuser), the one place tag sizes are defined.
+    ``camera_ids`` picks the tags *this* camera reports (e.g. the front
+    camera the side tags, the down camera the bottom ones); empty, or
+    ``[-1]`` (the ROS parameter default, an empty list has no type), keeps
+    every station tag. An ID that is not a station tag is an error, so a
+    typo fails at start-up instead of silently never detecting that tag.
+    """
+    if len(ids) != len(sizes) or not len(ids) or min(sizes) <= 0:
+        raise ValueError("tag_ids and tag_sizes must be non-empty, equal length, sizes > 0")
+    station = {int(i): float(s) for i, s in zip(ids, sizes)}
+    chosen = [int(i) for i in camera_ids if int(i) != -1]
+    if not chosen:
+        return station
+    unknown = sorted(set(chosen) - set(station))
+    if unknown:
+        raise ValueError(f"camera_tag_ids {unknown} are not station tags (tag_ids {sorted(station)} "
+                         "in station_tags.yaml)")
+    return {i: station[i] for i in chosen}
 
 
 def tag_corners(size: float) -> np.ndarray:
